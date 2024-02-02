@@ -1,0 +1,214 @@
+#!/bin/sh
+
+# porcha configure script
+
+
+print() {
+	printf -- "%s\n" "$*"
+}
+
+menu()
+{
+	print "Porcha 2016-2024
+
+	Usage:
+
+	--prefix=PREFIX	 main installation prefix [/usr/local/porcha]
+
+	Command line variables are added last to the config.mak and passed
+	to the makefile. For instance:
+
+	./configure AS='cc -x assembler'
+
+
+	"
+	exit 0
+}
+
+fatal()
+{
+	(>&2 print "fatal" "$*")
+	exit 1
+}
+
+detectcommand()
+{
+	printf "trying $i .. "
+	if command -v "$1" >/dev/null 2>&1
+	then	print "yes"
+		return 0
+	else	print "no"
+		return 1
+	fi
+}
+
+inspect_compiler()
+{
+	printf "trying %s .. " "$2"
+	print "long y = 1;" > "$temporary_file"
+	print "double z = 0;" >> "$temporary_file"
+	if "$CC" "$2" -c -o .temporary "$temporary_file" 2> .temporary
+	then	print "yes"
+		eval "$1=\"\${$1} \$2\""
+		eval "$1=\${$1# }"
+		return 0
+	else	print "no"
+		return 1
+	fi
+}
+
+
+OPERATING_SYSTEM="linux"
+FREESTANDING=
+CFLAGS_SUPPLEMENT=
+prefix="/usr/local/porcha"
+architecture=
+
+print "# Automatically generated" > config.mak
+
+for i in "$@"
+do	case "$i" in
+		-h|--help)
+			menu
+			;;
+		--prefix=*)
+			prefix=${i#*=}
+			;;
+		*=*)
+			# Let these be added at the end
+			;;
+		*)
+			fatal "$i is not a valid option !!"
+			;;
+	esac
+done
+
+# Detect the operating system
+OS_DIRTY_STR=$(uname -a)
+
+case $OS_DIRTY_STR in
+	*linux*|*Linux*)
+		OPERATING_SYSTEM="linux"
+			;;
+	*aix*)
+		OPERATING_SYSTEM="aix"
+			;;
+	*FreeBSD*|*freebsd*|*Freebsd*)
+		print "Note that the FreeBSD 'c99' command has a bug and won't accept '-dumpmachine'"
+		OPERATING_SYSTEM="freebsd"
+			;;
+	*NetBSD*|*netbsd*|*Netbsd*)
+		print "NetBSD is not fully supported."
+		print "It will build, and likely works, however NetBSD needs a note in the ELF headers"
+		print "which porcha has no functionality to provide at this time."
+		OPERATING_SYSTEM="netbsd"
+			;;
+	*Darwin*|*darwin*)
+		OPERATING_SYSTEM="macos"
+			;;
+	*OpenBSD*|*openbsd*|*Openbsd*)
+		OPERATING_SYSTEM="openbsd"
+			;;
+esac
+
+# Obtain a temporary file
+temporary_file="./temporary_work_file"
+[ -f "${temporary_file}" ] && rm "$temporary_file"
+
+print "Attempting to detect a C compiler ..."
+if [ -z "${CC}" ]
+then	for i in unlikely-cc gcc cc clang c99 pcc tcc
+	do	if detectcommand "$i"
+		then	CC="$i"
+			break
+		fi
+	done
+	if [ -z "${CC}" ]
+	then	fatal "No compiler was able to be found. Giving up."
+	fi
+else	detectcommand "${CC}"
+fi
+
+# Find target architecture
+printf "Automatically detecting the computer architecture: "
+architecture=$("$CC" -dumpmachine 2>/dev/null)
+
+if [ -z "$architecture" ]
+then	print
+	print "Warning: $CC does not appear to support -dumpmachine"
+	print "Falling back to uname -m which is not compiler specific"
+	print "This will mess up cross compiling unless your host and target are the same"
+	architecture=$(uname -m 2>/dev/null)
+fi
+
+print "$architecture"
+
+case "$architecture" in
+	*i*86*)
+		ARCH="i386"
+		;;
+	*arm64*|*aarch64*)
+		ARCH="aarch64"
+		;;
+	*amd64*|x86_64*)
+		ARCH="x86_64"
+		;;
+	*)
+		fatal "Unknown architecture !!"
+		;;
+esac
+
+
+# one offs
+AS="as"
+if [ $OPERATING_SYSTEM = "openbsd" -a $ARCH = "aarch64" ]
+then export AS="$CC -x assembler"
+fi
+
+# Obtain a freestanding C99 env
+inspect_compiler FREESTANDING -ffreestanding
+inspect_compiler FREESTANDING -std=c99
+inspect_compiler FREESTANDING -nostdinc
+inspect_compiler CFLAGS_SUPPLEMENT -pipe
+inspect_compiler CFLAGS_SUPPLEMENT -Os
+
+# Correct broken compiler installations
+inspect_compiler CFLAGS_SUPPLEMENT -fno-stack-protector
+inspect_compiler DISABLE_PIE -fno-pie
+inspect_compiler DISABLE_PIE -no-pie
+
+# Create the config.mak
+print "Generating a config.mak for the main Makefile"
+
+print "
+
+ARCH = $ARCH
+prefix = $prefix
+CC = $CC
+CFLAGS += $CFLAGS_SUPPLEMENT $CFLAGS
+FREESTANDING += $FREESTANDING
+DISABLE_PIE += $DISABLE_PIE
+OPERATING_SYSTEM += $OPERATING_SYSTEM
+AS = $AS
+" > config.mak
+
+# Adjust the compiler wrapper if clang is being used
+case "$CC" in
+	*clang*)
+		print "CC_IS_CLANG = yes" >> config.mak
+		print "" >> config.mak
+		;;
+esac
+
+for i in "$@"
+do	case "$i" in
+		*=*)	print "${i%=*} = ${i#*=}" >> config.mak ;;
+	esac
+done
+
+# Clean up and report
+rm "$temporary_file" .temporary
+
+print "done"
+
+
